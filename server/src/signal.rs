@@ -9,18 +9,29 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
-pub enum Message {
+pub enum ServerMessage {
     Candidate(RTCIceCandidateInit),
-    Sdp(String),
+    Offer { sdp: String },
+    Answer { sdp: String },
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum PeerMessage {
+    Candidate(RTCIceCandidateInit),
+    Offer { sdp: String },
+    Answer { sdp: String },
+    Name(String),
+    Pli(bool),
 }
 
 #[derive(Clone)]
 pub struct Sender {
-    tx: mpsc::Sender<Message>,
+    tx: mpsc::Sender<ServerMessage>,
 }
 
 impl Sender {
-    pub async fn send(&mut self, message: Message) {
+    pub async fn send(&mut self, message: ServerMessage) {
         self.tx.send(message).await.unwrap();
     }
 }
@@ -30,14 +41,12 @@ pub struct Receiver {
 }
 
 impl Receiver {
-    pub async fn recv(&mut self) -> Option<Option<Message>> {
-        Some(
-            if let WebSocketMessage::Text(text) = self.stream.next().await?.unwrap() {
-                Some(serde_json::from_str::<Message>(&text).unwrap())
-            } else {
-                None
-            },
-        )
+    pub async fn recv(&mut self) -> Option<PeerMessage> {
+        if let WebSocketMessage::Text(text) = self.stream.next().await?.unwrap() {
+            Some(serde_json::from_str::<PeerMessage>(&text).unwrap())
+        } else {
+            None
+        }
     }
 }
 
