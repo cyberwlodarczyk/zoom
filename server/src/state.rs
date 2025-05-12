@@ -5,12 +5,17 @@ use webrtc::{
     track::track_local::track_local_static_rtp::TrackLocalStaticRTP,
 };
 
+pub struct MediaState {
+    pub track: Arc<TrackLocalStaticRTP>,
+    pub ssrc: u32,
+}
+
 pub struct PeerState {
     pub id: u32,
     pub conn: RTCPeerConnection,
     pub name: Option<String>,
-    pub local_track: Option<Arc<TrackLocalStaticRTP>>,
-    pub media_ssrc: Option<u32>,
+    pub video: Option<MediaState>,
+    pub audio: Option<MediaState>,
 }
 
 pub struct ServerState {
@@ -42,8 +47,8 @@ impl ServerState {
             id,
             conn,
             name: None,
-            local_track: None,
-            media_ssrc: None,
+            video: None,
+            audio: None,
         });
         self.next_peer_id += 1;
         id

@@ -12,6 +12,7 @@ use axum::{
     routing::get,
 };
 use once_cell::sync::Lazy;
+use state::MediaState;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex as TokioMutex, mpsc};
@@ -72,7 +73,7 @@ async fn signal_handler(
 
 async fn signal_handler_upgrade(state: Arc<TokioMutex<ServerState>>, socket: WebSocket) {
     let (signal_tx, mut signal_rx) = signal::channel(socket);
-    let (local_track_tx, mut local_track_rx) = mpsc::channel::<Arc<TrackLocalStaticRTP>>(1);
+    let (local_track_tx, mut local_track_rx) = mpsc::channel::<(RTPCodecType, MediaState)>(2);
     let peer_conn = create_peer_connection().await;
 
     let mut state_lock = state.lock().await;
@@ -81,28 +82,32 @@ async fn signal_handler_upgrade(state: Arc<TokioMutex<ServerState>>, socket: Web
 
     println!("[{id}] new peer");
 
-    println!("[{id}] adding recvonly transceiver");
-    peer.conn
-        .add_transceiver_from_kind(
-            RTPCodecType::Video,
-            Some(RTCRtpTransceiverInit {
-                direction: RTCRtpTransceiverDirection::Recvonly,
-                send_encodings: vec![],
-            }),
-        )
-        .await
-        .unwrap();
+    println!("[{id}] adding recvonly transceivers");
+    for kind in [RTPCodecType::Video, RTPCodecType::Audio] {
+        peer.conn
+            .add_transceiver_from_kind(
+                kind,
+                Some(RTCRtpTransceiverInit {
+                    direction: RTCRtpTransceiverDirection::Recvonly,
+                    send_encodings: vec![],
+                }),
+            )
+            .await
+            .unwrap();
+    }
 
     for other in &state_lock.peers {
         if other.id == id {
             continue;
         }
-        println!("[{}] adding peer {} track", id, other.id);
-        if let Some(other_local_track) = &other.local_track {
-            peer.conn
-                .add_track(Arc::clone(other_local_track) as Arc<dyn TrackLocal + Send + Sync>)
-                .await
-                .unwrap();
+        println!("[{}] adding peer {} tracks", id, other.id);
+        for media in [&other.video, &other.audio] {
+            if let Some(media) = media {
+                peer.conn
+                    .add_track(Arc::clone(&media.track) as Arc<dyn TrackLocal + Send + Sync>)
+                    .await
+                    .unwrap();
+            }
         }
     }
 
@@ -152,31 +157,30 @@ async fn signal_handler_upgrade(state: Arc<TokioMutex<ServerState>>, socket: Web
     }));
 
     let local_track_tx1 = Arc::new(local_track_tx);
-    let state1 = Arc::clone(&state);
     peer.conn.on_track(Box::new(move |remote_track, _, _| {
         println!("[{id}] new remote track");
-        let media_ssrc = remote_track.ssrc();
         let local_track_tx2 = Arc::clone(&local_track_tx1);
-        let state2 = Arc::clone(&state1);
         tokio::spawn(async move {
             let local_track = Arc::new(TrackLocalStaticRTP::new(
                 remote_track.codec().capability,
-                id.to_string(),
+                format!("{}-{}", id.to_string(), remote_track.kind()),
                 remote_track.stream_id(),
             ));
             local_track_tx2
-                .send(Arc::clone(&local_track))
+                .send((
+                    remote_track.kind(),
+                    MediaState {
+                        track: Arc::clone(&local_track),
+                        ssrc: remote_track.ssrc(),
+                    },
+                ))
                 .await
                 .unwrap();
             while let Ok((rtp, _)) = remote_track.read_rtp().await {
                 local_track.write_rtp(&rtp).await.unwrap();
             }
         });
-        Box::pin(async move {
-            let mut state_lock = state2.lock().await;
-            let peer = state_lock.get_peer_mut(id);
-            peer.media_ssrc = Some(media_ssrc);
-        })
+        Box::pin(async {})
     }));
 
     drop(state_lock);
@@ -218,11 +222,11 @@ async fn signal_handler_upgrade(state: Arc<TokioMutex<ServerState>>, socket: Web
                 PeerMessage::Name(name) => peer.name = Some(name),
                 PeerMessage::Pli(_) => {
                     println!("[{id}] pli request received");
-                    if let Some(media_ssrc) = peer.media_ssrc {
+                    if let Some(media) = &peer.video {
                         peer.conn
                             .write_rtcp(&[Box::new(PictureLossIndication {
                                 sender_ssrc: 0,
-                                media_ssrc,
+                                media_ssrc: media.ssrc,
                             })])
                             .await
                             .unwrap();
@@ -232,18 +236,23 @@ async fn signal_handler_upgrade(state: Arc<TokioMutex<ServerState>>, socket: Web
         }
     });
 
-    if let Some(local_track) = local_track_rx.recv().await {
+    while let Some((kind, media)) = local_track_rx.recv().await {
         let mut state_lock = state.lock().await;
         let peer = state_lock.get_peer_mut(id);
-        peer.local_track = Some(Arc::clone(&local_track));
+        let track = Arc::clone(&media.track);
+        match kind {
+            RTPCodecType::Audio => peer.audio = Some(media),
+            RTPCodecType::Video => peer.video = Some(media),
+            _ => {}
+        }
         for other in &state_lock.peers {
             if other.id == id {
                 continue;
             }
-            println!("[{}] adding peer {} track", other.id, id);
+            println!("[{}] adding peer {} {} track", other.id, id, kind);
             other
                 .conn
-                .add_track(Arc::clone(&local_track) as Arc<dyn TrackLocal + Send + Sync>)
+                .add_track(Arc::clone(&track) as Arc<dyn TrackLocal + Send + Sync>)
                 .await
                 .unwrap();
         }

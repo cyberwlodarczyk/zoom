@@ -14,11 +14,11 @@ const app = document.getElementById("app")!;
 const rtc = new RTCPeerConnection();
 const signal = new WebSocket("http://localhost:3000/signal");
 
-const addVideo = (stream: MediaStream) => {
-  const video = document.createElement("video");
-  video.srcObject = stream;
-  video.autoplay = true;
-  app.appendChild(video);
+const addStream = (stream: MediaStream, tagName: "audio" | "video") => {
+  const el = document.createElement(tagName);
+  el.srcObject = stream;
+  el.autoplay = true;
+  app.appendChild(el);
 };
 
 const send = (message: PeerMessage) => {
@@ -26,10 +26,13 @@ const send = (message: PeerMessage) => {
 };
 
 signal.addEventListener("open", async () => {
-  const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-  const [track] = stream.getTracks();
-  rtc.addTrack(track, stream);
-  addVideo(stream);
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: true,
+    video: true,
+  });
+  stream.getTracks().forEach((track) => rtc.addTrack(track, stream));
+  addStream(stream, "video");
+  addStream(stream, "audio");
   rtc.addEventListener("connectionstatechange", () => {
     if (rtc.connectionState === "connected") {
       console.log("connection established");
@@ -51,7 +54,7 @@ signal.addEventListener("open", async () => {
   rtc.addEventListener("track", (event) => {
     console.log("new remote track");
     const [stream] = event.streams;
-    addVideo(stream);
+    addStream(stream, event.track.kind as "audio" | "video");
     console.log("requesting pli");
     send({ pli: true });
   });
