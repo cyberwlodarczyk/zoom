@@ -5,6 +5,8 @@ use webrtc::{
     track::track_local::track_local_static_rtp::TrackLocalStaticRTP,
 };
 
+use crate::signal::Sender;
+
 pub struct MediaState {
     pub track: Arc<TrackLocalStaticRTP>,
     pub ssrc: u32,
@@ -13,6 +15,7 @@ pub struct MediaState {
 pub struct PeerState {
     pub id: u32,
     pub conn: RTCPeerConnection,
+    pub signal_tx: Sender,
     pub name: Option<String>,
     pub video: Option<MediaState>,
     pub audio: Option<MediaState>,
@@ -41,11 +44,12 @@ impl ServerState {
         &mut self.peers[index]
     }
 
-    pub fn add_peer(&mut self, conn: RTCPeerConnection) -> u32 {
+    pub fn add_peer(&mut self, conn: RTCPeerConnection, signal_tx: Sender) -> u32 {
         let id = self.next_peer_id;
         self.peers.push(PeerState {
             id,
             conn,
+            signal_tx,
             name: None,
             video: None,
             audio: None,

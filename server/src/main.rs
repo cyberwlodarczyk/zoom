@@ -12,6 +12,7 @@ use axum::{
     routing::get,
 };
 use once_cell::sync::Lazy;
+use signal::ServerMessagePeer;
 use state::MediaState;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
@@ -72,15 +73,16 @@ async fn signal_handler(
 }
 
 async fn signal_handler_upgrade(state: Arc<TokioMutex<ServerState>>, socket: WebSocket) {
-    let (signal_tx, mut signal_rx) = signal::channel(socket);
+    let (mut signal_tx, mut signal_rx) = signal::channel(socket);
     let (local_track_tx, mut local_track_rx) = mpsc::channel::<(RTPCodecType, MediaState)>(2);
     let peer_conn = create_peer_connection().await;
 
     let mut state_lock = state.lock().await;
-    let id = state_lock.add_peer(peer_conn);
+    let id = state_lock.add_peer(peer_conn, signal_tx.clone());
     let peer = state_lock.get_peer(id);
 
     println!("[{id}] new peer");
+    signal_tx.send(ServerMessage::Id(id)).await;
 
     println!("[{id}] adding recvonly transceivers");
     for kind in [RTPCodecType::Video, RTPCodecType::Audio] {
@@ -111,12 +113,51 @@ async fn signal_handler_upgrade(state: Arc<TokioMutex<ServerState>>, socket: Web
         }
     }
 
+    let state1 = Arc::clone(&state);
     peer.conn
         .on_peer_connection_state_change(Box::new(move |state| {
-            if state == RTCPeerConnectionState::Connected {
-                println!("[{id}] connection established");
+            if state != RTCPeerConnectionState::Connected {
+                return Box::pin(async {});
             }
-            Box::pin(async {})
+            println!("[{id}] connection established");
+            let state2 = Arc::clone(&state1);
+            Box::pin(async move {
+                let state_lock = state2.lock().await;
+                let peer = state_lock.get_peer(id);
+                let name = peer.name.clone();
+                let mut signal_tx = peer.signal_tx.clone();
+                drop(state_lock);
+                let state_lock = state2.lock().await;
+                signal_tx
+                    .send(ServerMessage::Peers(
+                        state_lock
+                            .peers
+                            .iter()
+                            .filter(|p| {
+                                p.conn.connection_state() == RTCPeerConnectionState::Connected
+                                    && p.id != id
+                            })
+                            .map(|p| ServerMessagePeer {
+                                id: p.id,
+                                name: p.name.clone().unwrap(),
+                            })
+                            .collect(),
+                    ))
+                    .await;
+                drop(state_lock);
+                let mut state_lock = state2.lock().await;
+                for other in &mut state_lock.peers {
+                    if other.id == id {
+                        continue;
+                    }
+                    if let Some(name) = name.clone() {
+                        other
+                            .signal_tx
+                            .send(ServerMessage::Peer(ServerMessagePeer { id, name }))
+                            .await;
+                    }
+                }
+            })
         }));
 
     let signal_tx1 = signal_tx.clone();
@@ -136,9 +177,7 @@ async fn signal_handler_upgrade(state: Arc<TokioMutex<ServerState>>, socket: Web
                 .set_local_description(offer.clone())
                 .await
                 .unwrap();
-            signal_tx2
-                .send(ServerMessage::Offer { sdp: offer.sdp })
-                .await;
+            signal_tx2.send(ServerMessage::Offer(offer.sdp)).await;
             println!("[{id}] offer sent")
         })
     }));
@@ -192,7 +231,7 @@ async fn signal_handler_upgrade(state: Arc<TokioMutex<ServerState>>, socket: Web
             let mut state_lock = state1.lock().await;
             let peer = state_lock.get_peer_mut(id);
             match msg {
-                PeerMessage::Offer { sdp } => {
+                PeerMessage::Offer(sdp) => {
                     println!("[{id}] offer received");
                     peer.conn
                         .set_remote_description(RTCSessionDescription::offer(sdp).unwrap())
@@ -203,12 +242,10 @@ async fn signal_handler_upgrade(state: Arc<TokioMutex<ServerState>>, socket: Web
                         .set_local_description(answer.clone())
                         .await
                         .unwrap();
-                    signal_tx1
-                        .send(ServerMessage::Answer { sdp: answer.sdp })
-                        .await;
+                    signal_tx1.send(ServerMessage::Answer(answer.sdp)).await;
                     println!("[{id}] answer sent");
                 }
-                PeerMessage::Answer { sdp } => {
+                PeerMessage::Answer(sdp) => {
                     println!("[{id}] answer received");
                     peer.conn
                         .set_remote_description(RTCSessionDescription::answer(sdp).unwrap())

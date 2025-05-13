@@ -1,12 +1,20 @@
+type ServerMessagePeer = {
+  id: number;
+  name: string;
+};
+
 type ServerMessage =
   | { candidate: RTCIceCandidateInit }
-  | { offer: { sdp: string } }
-  | { answer: { sdp: string } };
+  | { offer: string }
+  | { answer: string }
+  | { id: number }
+  | { peers: ServerMessagePeer[] }
+  | { peer: ServerMessagePeer };
 
 type PeerMessage =
   | { candidate: RTCIceCandidateInit }
-  | { offer: { sdp: string } }
-  | { answer: { sdp: string } }
+  | { offer: string }
+  | { answer: string }
   | { name: string }
   | { pli: boolean };
 
@@ -61,7 +69,7 @@ signal.addEventListener("open", async () => {
   const offer = await rtc.createOffer();
   await rtc.setLocalDescription(offer);
   if (offer.sdp) {
-    send({ offer: { sdp: offer.sdp } });
+    send({ offer: offer.sdp });
     console.log("offer sent");
     console.log(offer.sdp);
     send({ name: `${Date.now()}` });
@@ -74,20 +82,29 @@ signal.addEventListener("message", async (event) => {
   if ("candidate" in message) {
     console.log("new remote ice candidate");
     await rtc.addIceCandidate(message.candidate);
-  } else if ("answer" in message) {
-    console.log("answer received");
-    console.log(message.answer.sdp);
-    await rtc.setRemoteDescription({ type: "answer", sdp: message.answer.sdp });
-  } else {
+  } else if ("offer" in message) {
     console.log("offer received");
-    console.log(message.offer.sdp);
-    await rtc.setRemoteDescription({ type: "offer", sdp: message.offer.sdp });
+    console.log(message.offer);
+    await rtc.setRemoteDescription({ type: "offer", sdp: message.offer });
     const answer = await rtc.createAnswer();
     await rtc.setLocalDescription(answer);
     if (answer.sdp) {
-      send({ answer: { sdp: answer.sdp } });
+      send({ answer: answer.sdp });
       console.log("answer sent");
       console.log(answer.sdp);
     }
+  } else if ("answer" in message) {
+    console.log("answer received");
+    console.log(message.answer);
+    await rtc.setRemoteDescription({ type: "answer", sdp: message.answer });
+  } else if ("id" in message) {
+    console.log("id received");
+    console.log(message.id);
+  } else if ("peers" in message) {
+    console.log("peers received");
+    console.log(message.peers);
+  } else if ("peer" in message) {
+    console.log("peer received");
+    console.log(message.peer);
   }
 });

@@ -9,18 +9,28 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct ServerMessagePeer {
+    pub id: u32,
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub enum ServerMessage {
     Candidate(RTCIceCandidateInit),
-    Offer { sdp: String },
-    Answer { sdp: String },
+    Offer(String),
+    Answer(String),
+    Id(u32),
+    Peers(Vec<ServerMessagePeer>),
+    Peer(ServerMessagePeer),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub enum PeerMessage {
     Candidate(RTCIceCandidateInit),
-    Offer { sdp: String },
-    Answer { sdp: String },
+    Offer(String),
+    Answer(String),
     Name(String),
     Pli(bool),
 }
