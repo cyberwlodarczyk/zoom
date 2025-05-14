@@ -32,7 +32,7 @@ pub enum PeerMessage {
     Offer(String),
     Answer(String),
     Name(String),
-    Pli(bool),
+    Pli(u32),
 }
 
 #[derive(Clone)]

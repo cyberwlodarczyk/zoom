@@ -16,7 +16,7 @@ type PeerMessage =
   | { offer: string }
   | { answer: string }
   | { name: string }
-  | { pli: boolean };
+  | { pli: number };
 
 const app = document.getElementById("app")!;
 const rtc = new RTCPeerConnection();
@@ -63,9 +63,19 @@ signal.addEventListener("open", async () => {
     console.log("new remote track");
     const [stream] = event.streams;
     addStream(stream, event.track.kind as "audio" | "video");
-    console.log("requesting pli");
-    send({ pli: true });
   });
+  setInterval(async () => {
+    const stats = await rtc.getStats();
+    stats.forEach((report: RTCInboundRtpStreamStats) => {
+      if (
+        report.type === "inbound-rtp" &&
+        report.kind === "video" &&
+        report.framesDecoded === 0
+      ) {
+        send({ pli: parseInt(report.trackIdentifier.split(" ")[0]) });
+      }
+    });
+  }, 100);
   const offer = await rtc.createOffer();
   await rtc.setLocalDescription(offer);
   if (offer.sdp) {

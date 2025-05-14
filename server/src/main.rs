@@ -257,16 +257,20 @@ async fn signal_handler_upgrade(state: Arc<TokioMutex<ServerState>>, socket: Web
                     peer.conn.add_ice_candidate(candidate).await.unwrap();
                 }
                 PeerMessage::Name(name) => peer.name = Some(name),
-                PeerMessage::Pli(_) => {
-                    println!("[{id}] pli request received");
-                    if let Some(media) = &peer.video {
-                        peer.conn
-                            .write_rtcp(&[Box::new(PictureLossIndication {
-                                sender_ssrc: 0,
-                                media_ssrc: media.ssrc,
-                            })])
-                            .await
-                            .unwrap();
+                PeerMessage::Pli(id) => {
+                    println!("[{}] pli requested for peer {}", peer.id, id);
+                    for peer in &state_lock.peers {
+                        if peer.id == id {
+                            if let Some(video) = &peer.video {
+                                peer.conn
+                                    .write_rtcp(&[Box::new(PictureLossIndication {
+                                        sender_ssrc: 0,
+                                        media_ssrc: video.ssrc,
+                                    })])
+                                    .await
+                                    .unwrap();
+                            }
+                        }
                     }
                 }
             }
