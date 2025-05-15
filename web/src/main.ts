@@ -18,9 +18,15 @@ type PeerMessage =
   | { name: string }
   | { pli: number };
 
+const codes = ["fow-xma-jwk", "gpq-vnw-epc", "vco-ols-rdp"];
+
 const app = document.getElementById("app")!;
 const rtc = new RTCPeerConnection();
-const signal = new WebSocket("http://localhost:3000/signal");
+const signal = new WebSocket(
+  `http://localhost:3000/signal?code=${
+    codes[Math.floor(Math.random() * codes.length)]
+  }`
+);
 
 const addStream = (stream: MediaStream, tagName: "audio" | "video") => {
   const el = document.createElement(tagName);
