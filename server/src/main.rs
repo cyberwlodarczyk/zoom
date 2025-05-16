@@ -13,6 +13,7 @@ use axum::{
     routing::get,
 };
 use once_cell::sync::Lazy;
+use rand::Rng;
 use signal::ServerMessagePeer;
 use state::PeerMedia;
 use std::{
@@ -74,13 +75,31 @@ fn is_valid_code(code: &str) -> bool {
     return true;
 }
 
+fn generate_code() -> String {
+    let mut rng = rand::rng();
+    let mut code = String::with_capacity(11);
+    for i in 0..9 {
+        let c = rng.random_range(b'a'..b'z');
+        code.push(c as char);
+        if i == 2 || i == 5 {
+            code.push(b'-' as char);
+        }
+    }
+    return code;
+}
+
 #[tokio::main]
 async fn main() {
     let router = Router::new()
+        .route("/code", get(code_handler))
         .route("/signal", get(signal_handler))
         .with_state(Arc::new(State::new()));
     let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, router).await.unwrap();
+}
+
+async fn code_handler() -> String {
+    generate_code()
 }
 
 async fn signal_handler(
