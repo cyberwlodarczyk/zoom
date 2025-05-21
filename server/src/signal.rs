@@ -22,7 +22,8 @@ pub enum ServerMessage {
     Answer(String),
     Id(u32),
     Peers(Vec<ServerMessagePeer>),
-    Peer(ServerMessagePeer),
+    PeerJoined(ServerMessagePeer),
+    PeerLeft(u32),
 }
 
 #[derive(Serialize, Deserialize, Debug)]

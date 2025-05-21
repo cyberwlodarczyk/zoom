@@ -6,7 +6,7 @@ use std::sync::{
 use dashmap::{DashMap, Entry};
 use tokio::sync::Mutex;
 use webrtc::{
-    peer_connection::RTCPeerConnection,
+    ice_transport::ice_candidate::RTCIceCandidateInit, peer_connection::RTCPeerConnection,
     track::track_local::track_local_static_rtp::TrackLocalStaticRTP,
 };
 
@@ -24,6 +24,7 @@ pub struct Peer {
     pub name: Option<String>,
     pub video: Option<PeerMedia>,
     pub audio: Option<PeerMedia>,
+    pub pending_candidates: Vec<RTCIceCandidateInit>,
 }
 
 pub struct Room {
@@ -64,8 +65,13 @@ impl Room {
             name: None,
             video: None,
             audio: None,
+            pending_candidates: Vec::new(),
         });
         id
+    }
+
+    pub fn remove_peer(&mut self, id: u32) -> Peer {
+        self.peers.swap_remove(self.get_peer_index(id))
     }
 }
 
@@ -94,5 +100,9 @@ impl State {
                 room
             }
         }
+    }
+
+    pub fn remove_room(&self, code: &String) {
+        self.rooms.remove(code);
     }
 }
