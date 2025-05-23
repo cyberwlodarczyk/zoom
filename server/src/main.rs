@@ -12,97 +12,16 @@ use axum::{
     response::Response,
     routing::get,
 };
-use once_cell::sync::Lazy;
-use rand::Rng;
-use signal::ServerMessagePeer;
-use state::{Peer, PeerMedia};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Arc};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
-use webrtc::{
-    api::{APIBuilder, media_engine::MediaEngine},
-    peer_connection::{
-        RTCPeerConnection, configuration::RTCConfiguration,
-        peer_connection_state::RTCPeerConnectionState,
-        sdp::session_description::RTCSessionDescription, signaling_state::RTCSignalingState,
-    },
-    rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication,
-    rtp_transceiver::{
-        RTCRtpTransceiverInit, rtp_codec::RTPCodecType,
-        rtp_transceiver_direction::RTCRtpTransceiverDirection,
-    },
-    track::track_local::{
-        TrackLocal, TrackLocalWriter, track_local_static_rtp::TrackLocalStaticRTP,
-    },
-};
+use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 
+mod code;
+mod peer;
+mod room;
 mod signal;
 mod state;
-
-static MEDIA_ENGINE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-
-fn create_media_engine() -> MediaEngine {
-    let mut engine = MediaEngine::default();
-    let _lock = MEDIA_ENGINE_MUTEX.lock().unwrap();
-    engine.register_default_codecs().unwrap();
-    return engine;
-}
-
-async fn create_peer_connection() -> RTCPeerConnection {
-    let api = APIBuilder::new()
-        .with_media_engine(create_media_engine())
-        .build();
-    let config = RTCConfiguration::default();
-    return api.new_peer_connection(config).await.unwrap();
-}
-
-async fn set_remote_description(peer: &mut Peer, description: RTCSessionDescription) {
-    peer.conn.set_remote_description(description).await.unwrap();
-    for candidate in peer.pending_candidates.drain(..) {
-        peer.conn.add_ice_candidate(candidate).await.unwrap();
-    }
-}
-
-async fn create_offer(peer: &mut Peer) {
-    let offer = peer.conn.create_offer(None).await.unwrap();
-    peer.conn
-        .set_local_description(offer.clone())
-        .await
-        .unwrap();
-    peer.signal_tx.send(ServerMessage::Offer(offer.sdp)).await;
-}
-
-fn is_valid_code(code: &str) -> bool {
-    if code.len() != 11 {
-        return false;
-    }
-    for (i, c) in code.bytes().enumerate() {
-        if i == 3 || i == 7 {
-            if c != b'-' {
-                return false;
-            }
-        } else if c < b'a' || c > b'z' {
-            return false;
-        }
-    }
-    return true;
-}
-
-fn generate_code() -> String {
-    let mut rng = rand::rng();
-    let mut code = String::with_capacity(11);
-    for i in 0..9 {
-        let c = rng.random_range(b'a'..b'z');
-        code.push(c as char);
-        if i == 2 || i == 5 {
-            code.push(b'-' as char);
-        }
-    }
-    return code;
-}
+mod track;
 
 #[tokio::main]
 async fn main() {
@@ -115,7 +34,7 @@ async fn main() {
 }
 
 async fn code_handler() -> String {
-    generate_code()
+    code::generate()
 }
 
 async fn signal_handler(
@@ -126,7 +45,7 @@ async fn signal_handler(
     let code = params.get("code");
     if let Some(code) = code {
         let code = code.clone();
-        if is_valid_code(&code) {
+        if code::is_valid(&code) {
             return ws.on_upgrade(async move |socket| {
                 signal_handler_upgrade(state, socket, code).await;
             });
@@ -136,145 +55,49 @@ async fn signal_handler(
 }
 
 async fn signal_handler_upgrade(state: Arc<State>, socket: WebSocket, code: String) {
-    let (mut signal_tx, mut signal_rx) = signal::channel(socket);
-    let (local_track_tx, mut local_track_rx) = mpsc::channel::<(RTPCodecType, PeerMedia)>(2);
-    let peer_conn = create_peer_connection().await;
+    let (signal_tx, mut signal_rx) = signal::channel(socket);
 
     let room = state.get_room(code.clone());
     let mut room_guard = room.lock().await;
-    let room_id = room_guard.id;
-    let id = room_guard.add_peer(peer_conn, signal_tx.clone());
+    let id = room_guard.add_peer(signal_tx.clone()).await;
     let peer = room_guard.get_peer(id);
 
-    println!("[{room_id}][{id}] new peer");
-    signal_tx.send(ServerMessage::Id(id)).await;
+    let (track_tx, mut track_rx) = track::channel(id);
 
-    println!("[{room_id}][{id}] adding recvonly transceivers");
     for kind in [RTPCodecType::Video, RTPCodecType::Audio] {
-        peer.conn
-            .add_transceiver_from_kind(
-                kind,
-                Some(RTCRtpTransceiverInit {
-                    direction: RTCRtpTransceiverDirection::Recvonly,
-                    send_encodings: vec![],
-                }),
-            )
-            .await
-            .unwrap();
+        peer.add_recvonly_transceiver(kind).await;
     }
 
-    for other in &room_guard.peers {
-        if other.id == id {
-            continue;
-        }
-        println!("[{}][{}] adding peer {} tracks", room_id, id, other.id);
-        for media in [&other.video, &other.audio] {
-            if let Some(media) = media {
-                peer.conn
-                    .add_transceiver_from_track(
-                        Arc::clone(&media.track) as Arc<dyn TrackLocal + Send + Sync>,
-                        Some(RTCRtpTransceiverInit {
-                            direction: RTCRtpTransceiverDirection::Sendonly,
-                            send_encodings: vec![],
-                        }),
-                    )
-                    .await
-                    .unwrap();
-            }
-        }
-    }
+    room_guard.add_other_peers_tracks(peer).await;
 
     let room1 = Arc::clone(&room);
-    peer.conn
-        .on_peer_connection_state_change(Box::new(move |state| {
-            if state != RTCPeerConnectionState::Connected {
-                return Box::pin(async {});
-            }
-            println!("[{room_id}][{id}] connection established");
-            let room2 = Arc::clone(&room1);
-            Box::pin(async move {
-                let mut room_guard = room2.lock().await;
-                let peer = room_guard.get_peer_mut(id);
-                create_offer(peer).await;
-                println!("[{room_id}][{id}] offer sent");
-                let name = peer.name.clone();
-                let mut signal_tx = peer.signal_tx.clone();
-                drop(room_guard);
-                let room_guard = room2.lock().await;
-                signal_tx
-                    .send(ServerMessage::Peers(
-                        room_guard
-                            .peers
-                            .iter()
-                            .filter(|p| {
-                                p.conn.connection_state() == RTCPeerConnectionState::Connected
-                                    && p.id != id
-                            })
-                            .map(|p| ServerMessagePeer {
-                                id: p.id,
-                                name: p.name.clone().unwrap(),
-                            })
-                            .collect(),
-                    ))
-                    .await;
-                drop(room_guard);
-                let mut room_guard = room2.lock().await;
-                for other in &mut room_guard.peers {
-                    if other.id == id {
-                        continue;
-                    }
-                    if let Some(name) = name.clone() {
-                        other
-                            .signal_tx
-                            .send(ServerMessage::PeerJoined(ServerMessagePeer { id, name }))
-                            .await;
-                    }
-                }
-            })
-        }));
-
-    let signal_tx1 = signal_tx.clone();
-    peer.conn.on_ice_candidate(Box::new(move |candidate| {
-        println!("[{room_id}][{id}] new local ice candidate");
-        let mut signal_tx2 = signal_tx1.clone();
+    peer.on_connected(Box::new(move || {
+        let room2 = Arc::clone(&room1);
         Box::pin(async move {
-            if let Some(candidate) = candidate {
-                signal_tx2
-                    .send(ServerMessage::Candidate(candidate.to_json().unwrap()))
-                    .await;
+            let room_guard = room2.lock().await;
+            let message = ServerMessage::Peers(room_guard.get_server_message_peers(id));
+            drop(room_guard);
+
+            let mut room_guard = room2.lock().await;
+            let peer = room_guard.get_peer_mut(id);
+            peer.send_offer().await;
+            peer.send_message(message).await;
+            if let Some(name) = peer.name.clone() {
+                room_guard.send_joined_peer(id, name).await;
             }
         })
     }));
 
-    peer.conn.on_negotiation_needed(Box::new(move || {
-        println!("negotiation needed");
-        Box::pin(async {})
+    let signal_tx1 = signal_tx.clone();
+    peer.on_candidate(Box::new(move |candidate| {
+        let mut signal_tx2 = signal_tx1.clone();
+        Box::pin(async move {
+            signal_tx2.send(ServerMessage::Candidate(candidate)).await;
+        })
     }));
 
-    let local_track_tx1 = Arc::new(local_track_tx);
-    peer.conn.on_track(Box::new(move |remote_track, _, _| {
-        println!("[{room_id}][{id}] new remote track");
-        let local_track_tx2 = Arc::clone(&local_track_tx1);
-        tokio::spawn(async move {
-            let local_track = Arc::new(TrackLocalStaticRTP::new(
-                remote_track.codec().capability,
-                format!("{}-{}", id.to_string(), remote_track.kind()),
-                remote_track.stream_id(),
-            ));
-            local_track_tx2
-                .send((
-                    remote_track.kind(),
-                    PeerMedia {
-                        track: Arc::clone(&local_track),
-                        ssrc: remote_track.ssrc(),
-                    },
-                ))
-                .await
-                .unwrap();
-            while let Ok((rtp, _)) = remote_track.read_rtp().await {
-                local_track.write_rtp(&rtp).await.unwrap();
-            }
-        });
+    peer.on_track(Box::new(move |track_remote| {
+        track_tx.clone().send(track_remote);
         Box::pin(async {})
     }));
 
@@ -285,75 +108,24 @@ async fn signal_handler_upgrade(state: Arc<State>, socket: WebSocket, code: Stri
             let peer = room_guard.get_peer_mut(id);
             match msg {
                 PeerMessage::Offer(sdp) => {
-                    println!("[{room_id}][{id}] offer received");
-                    if peer.conn.signaling_state() != RTCSignalingState::Stable {
-                        println!("[{room_id}][{id}] signaling state not stable");
-                        continue;
-                    }
-                    set_remote_description(peer, RTCSessionDescription::offer(sdp).unwrap()).await;
-                    let answer = peer.conn.create_answer(None).await.unwrap();
-                    peer.conn
-                        .set_local_description(answer.clone())
-                        .await
-                        .unwrap();
-                    peer.signal_tx.send(ServerMessage::Answer(answer.sdp)).await;
-                    println!("[{room_id}][{id}] answer sent");
+                    peer.recv_offer(sdp).await;
                 }
                 PeerMessage::Answer(sdp) => {
-                    println!("[{room_id}][{id}] answer received");
-                    set_remote_description(peer, RTCSessionDescription::answer(sdp).unwrap()).await;
+                    peer.recv_answer(sdp).await;
                 }
                 PeerMessage::Candidate(candidate) => {
-                    println!("[{room_id}][{id}] new remote ice candidate");
-                    if peer.conn.remote_description().await.is_some() {
-                        peer.conn.add_ice_candidate(candidate).await.unwrap();
-                    } else {
-                        peer.pending_candidates.push(candidate);
-                    }
+                    peer.add_candidate(candidate).await;
                 }
-                PeerMessage::Name(name) => peer.name = Some(name),
+                PeerMessage::Name(name) => {
+                    peer.set_name(name);
+                }
                 PeerMessage::Pli(id) => {
-                    println!("[{}][{}] pli requested for peer {}", room_id, peer.id, id);
-                    for peer in &room_guard.peers {
-                        if peer.id == id {
-                            if let Some(video) = &peer.video {
-                                peer.conn
-                                    .write_rtcp(&[Box::new(PictureLossIndication {
-                                        sender_ssrc: 0,
-                                        media_ssrc: video.ssrc,
-                                    })])
-                                    .await
-                                    .unwrap();
-                            }
-                        }
-                    }
+                    room_guard.send_pli(id).await;
                 }
             }
         }
         let mut room_guard = room1.lock().await;
-        let peer = room_guard.remove_peer(id);
-        peer.conn.close().await.unwrap();
-        println!("[{room_id}][{id}] connection closed");
-        let id_str = id.to_string();
-        for other in &mut room_guard.peers {
-            other.signal_tx.send(ServerMessage::PeerLeft(id)).await;
-            for transceiver in other.conn.get_transceivers().await {
-                if let Some(track) = transceiver.sender().await.track().await {
-                    if track.id().starts_with(&id_str) {
-                        println!(
-                            "[{}][{}] stopping peer {} {} transceiver",
-                            room_id,
-                            other.id,
-                            id,
-                            track.kind()
-                        );
-                        transceiver.stop().await.unwrap();
-                    }
-                }
-            }
-            create_offer(other).await;
-            println!("[{}][{}] offer sent", room_id, other.id);
-        }
+        room_guard.handle_peer_leave(id).await;
         if room_guard.peers.len() == 0 {
             state.remove_room(&code);
         }
@@ -361,35 +133,15 @@ async fn signal_handler_upgrade(state: Arc<State>, socket: WebSocket, code: Stri
 
     let room1 = Arc::clone(&room);
     tokio::spawn(async move {
-        let mut local_track_count = 0;
-        while let Some((kind, media)) = local_track_rx.recv().await {
-            local_track_count += 1;
+        while let Some(track) = track_rx.recv().await {
             let mut room_guard = room1.lock().await;
             let peer = room_guard.get_peer_mut(id);
-            let track = Arc::clone(&media.track);
-            match kind {
-                RTPCodecType::Audio => peer.audio = Some(media),
-                RTPCodecType::Video => peer.video = Some(media),
-                _ => {}
-            }
-            for other in &mut room_guard.peers {
-                if other.id == id {
-                    continue;
-                }
-                println!(
-                    "[{}][{}] adding peer {} {} track",
-                    room_id, other.id, id, kind
-                );
-                other
-                    .conn
-                    .add_track(Arc::clone(&track) as Arc<dyn TrackLocal + Send + Sync>)
-                    .await
-                    .unwrap();
-                if local_track_count == 2 {
-                    create_offer(other).await;
-                    println!("[{}][{}] offer sent", room_id, other.id);
-                }
-            }
+            let track_local = Arc::clone(&track.inner.inner);
+            peer.set_track(track);
+            let send_offer = peer.is_audio_and_video();
+            room_guard
+                .add_peer_track_to_others(id, track_local, send_offer)
+                .await;
         }
     });
 }

@@ -5,75 +5,8 @@ use std::sync::{
 
 use dashmap::{DashMap, Entry};
 use tokio::sync::Mutex;
-use webrtc::{
-    ice_transport::ice_candidate::RTCIceCandidateInit, peer_connection::RTCPeerConnection,
-    track::track_local::track_local_static_rtp::TrackLocalStaticRTP,
-};
 
-use crate::signal::Sender;
-
-pub struct PeerMedia {
-    pub track: Arc<TrackLocalStaticRTP>,
-    pub ssrc: u32,
-}
-
-pub struct Peer {
-    pub id: u32,
-    pub conn: RTCPeerConnection,
-    pub signal_tx: Sender,
-    pub name: Option<String>,
-    pub video: Option<PeerMedia>,
-    pub audio: Option<PeerMedia>,
-    pub pending_candidates: Vec<RTCIceCandidateInit>,
-}
-
-pub struct Room {
-    next_peer_id: Arc<AtomicU32>,
-    pub id: u32,
-    pub peers: Vec<Peer>,
-}
-
-impl Room {
-    fn new(id: u32, next_peer_id: Arc<AtomicU32>) -> Self {
-        Self {
-            id,
-            next_peer_id,
-            peers: Vec::new(),
-        }
-    }
-
-    fn get_peer_index(&self, id: u32) -> usize {
-        self.peers.iter().position(|peer| peer.id == id).unwrap()
-    }
-
-    pub fn get_peer(&self, id: u32) -> &Peer {
-        let index = self.get_peer_index(id);
-        &self.peers[index]
-    }
-
-    pub fn get_peer_mut(&mut self, id: u32) -> &mut Peer {
-        let index = self.get_peer_index(id);
-        &mut self.peers[index]
-    }
-
-    pub fn add_peer(&mut self, conn: RTCPeerConnection, signal_tx: Sender) -> u32 {
-        let id = self.next_peer_id.fetch_add(1, Ordering::Relaxed);
-        self.peers.push(Peer {
-            id,
-            conn,
-            signal_tx,
-            name: None,
-            video: None,
-            audio: None,
-            pending_candidates: Vec::new(),
-        });
-        id
-    }
-
-    pub fn remove_peer(&mut self, id: u32) -> Peer {
-        self.peers.swap_remove(self.get_peer_index(id))
-    }
-}
+use crate::room::Room;
 
 pub struct State {
     next_peer_id: Arc<AtomicU32>,
