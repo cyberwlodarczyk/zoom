@@ -1,3 +1,4 @@
+use crate::error::{self, Result};
 use axum::extract::ws::{Message as WebSocketMessage, WebSocket};
 use futures::{
     sink::SinkExt,
@@ -42,8 +43,8 @@ pub struct Sender {
 }
 
 impl Sender {
-    pub async fn send(&mut self, message: ServerMessage) {
-        self.tx.send(message).await.unwrap();
+    pub async fn send(&mut self, message: ServerMessage) -> Result<()> {
+        Ok(self.tx.send(message).await?)
     }
 }
 
@@ -52,26 +53,33 @@ pub struct Receiver {
 }
 
 impl Receiver {
-    pub async fn recv(&mut self) -> Option<PeerMessage> {
-        if let WebSocketMessage::Text(text) = self.stream.next().await?.unwrap() {
-            Some(serde_json::from_str::<PeerMessage>(&text).unwrap())
-        } else {
-            None
-        }
+    pub async fn recv(&mut self) -> Result<Option<PeerMessage>> {
+        Ok(
+            if let Some(WebSocketMessage::Text(text)) = self
+                .stream
+                .next()
+                .await
+                .map_or(Ok(None), |res| res.map(Some))?
+            {
+                Some(serde_json::from_str::<PeerMessage>(&text)?)
+            } else {
+                None
+            },
+        )
     }
 }
 
-pub fn channel(socket: WebSocket) -> (Sender, Receiver) {
+pub fn channel(socket: WebSocket, error_tx: error::Sender) -> (Sender, Receiver) {
     let (mut sink, stream) = socket.split();
     let (tx, mut rx) = mpsc::channel(4);
-    tokio::spawn(async move {
+    error_tx.spawn(async move {
         while let Some(message) = rx.recv().await {
             sink.send(WebSocketMessage::Text(
                 serde_json::to_string(&message).unwrap().into(),
             ))
-            .await
-            .unwrap();
+            .await?;
         }
+        Ok(())
     });
     (Sender { tx }, Receiver { stream })
 }

@@ -21,6 +21,7 @@ use webrtc::{
 };
 
 use crate::{
+    error::Result,
     signal::{self, ServerMessage},
     track::Track,
 };
@@ -57,17 +58,17 @@ pub type OnPeerTrackHdlrFn = Box<
 >;
 
 impl Peer {
-    pub async fn new(id: u32, room_id: u32, signal_tx: signal::Sender) -> Self {
+    pub async fn new(id: u32, room_id: u32, signal_tx: signal::Sender) -> Result<Self> {
         let api = APIBuilder::new()
             .with_media_engine({
                 let mut engine = MediaEngine::default();
                 let _lock = MEDIA_ENGINE_MUTEX.lock().unwrap();
-                engine.register_default_codecs().unwrap();
+                engine.register_default_codecs()?;
                 engine
             })
             .build();
         let config = RTCConfiguration::default();
-        let conn = api.new_peer_connection(config).await.unwrap();
+        let conn = api.new_peer_connection(config).await?;
         let mut peer = Self {
             id,
             room_id,
@@ -78,9 +79,9 @@ impl Peer {
             audio: None,
             pending_candidates: Vec::new(),
         };
-        peer.signal_tx.send(ServerMessage::Id(id)).await;
+        peer.signal_tx.send(ServerMessage::Id(id)).await?;
         peer.debug("new peer");
-        peer
+        Ok(peer)
     }
 
     fn debug_format(&self, message: &str) -> String {
@@ -123,18 +124,19 @@ impl Peer {
         }));
     }
 
-    async fn set_remote_description(&mut self, description: RTCSessionDescription) {
-        self.conn.set_remote_description(description).await.unwrap();
+    async fn set_remote_description(&mut self, description: RTCSessionDescription) -> Result<()> {
+        self.conn.set_remote_description(description).await?;
         for candidate in self.pending_candidates.drain(..) {
-            self.conn.add_ice_candidate(candidate).await.unwrap();
+            self.conn.add_ice_candidate(candidate).await?;
         }
+        Ok(())
     }
 
     pub fn is_audio_and_video(&self) -> bool {
         self.audio.is_some() && self.video.is_some()
     }
 
-    pub async fn add_recvonly_transceiver(&self, kind: RTPCodecType) {
+    pub async fn add_recvonly_transceiver(&self, kind: RTPCodecType) -> Result<()> {
         self.conn
             .add_transceiver_from_kind(
                 kind,
@@ -143,12 +145,12 @@ impl Peer {
                     send_encodings: vec![],
                 }),
             )
-            .await
-            .unwrap();
+            .await?;
         self.debug(&format!("recvonly {} transceiver added", kind));
+        Ok(())
     }
 
-    pub async fn add_sendonly_transceiver(&self, track: &Arc<TrackLocalStaticRTP>) {
+    pub async fn add_sendonly_transceiver(&self, track: &Arc<TrackLocalStaticRTP>) -> Result<()> {
         self.conn
             .add_transceiver_from_track(
                 Arc::clone(track) as Arc<dyn TrackLocal + Send + Sync>,
@@ -157,17 +159,17 @@ impl Peer {
                     send_encodings: vec![],
                 }),
             )
-            .await
-            .unwrap();
+            .await?;
         self.debug(&format!("sendonly {} transceiver added", track.kind()));
+        Ok(())
     }
 
-    pub async fn stop_transceivers(&self, peer_id: u32) {
+    pub async fn stop_transceivers(&self, peer_id: u32) -> Result<()> {
         let peer_id_str = peer_id.to_string();
         for transceiver in self.conn.get_transceivers().await {
             if let Some(track) = transceiver.sender().await.track().await {
                 if track.id().starts_with(&peer_id_str) {
-                    transceiver.stop().await.unwrap();
+                    transceiver.stop().await?;
                     self.debug(&format!(
                         "peer {} {} transceiver stopped",
                         peer_id,
@@ -176,6 +178,7 @@ impl Peer {
                 }
             }
         }
+        Ok(())
     }
 
     pub fn set_name(&mut self, name: String) {
@@ -190,67 +193,68 @@ impl Peer {
         }
     }
 
-    pub async fn send_message(&mut self, message: ServerMessage) {
-        self.signal_tx.send(message).await;
+    pub async fn send_message(&mut self, message: ServerMessage) -> Result<()> {
+        self.signal_tx.send(message).await
     }
 
-    pub async fn send_pli(&self) {
+    pub async fn send_pli(&self) -> Result<()> {
         if let Some(video) = &self.video {
             self.conn
                 .write_rtcp(&[Box::new(PictureLossIndication {
                     sender_ssrc: 0,
                     media_ssrc: video.ssrc,
                 })])
-                .await
-                .unwrap();
+                .await?;
             self.debug("pli sent");
         }
+        Ok(())
     }
 
-    pub async fn send_offer(&mut self) {
-        let offer = self.conn.create_offer(None).await.unwrap();
-        self.conn
-            .set_local_description(offer.clone())
-            .await
-            .unwrap();
-        self.signal_tx.send(ServerMessage::Offer(offer.sdp)).await;
+    pub async fn send_offer(&mut self) -> Result<()> {
+        let offer = self.conn.create_offer(None).await?;
+        self.conn.set_local_description(offer.clone()).await?;
+        self.signal_tx.send(ServerMessage::Offer(offer.sdp)).await?;
         self.debug("offer sent");
+        Ok(())
     }
 
-    pub async fn recv_offer(&mut self, sdp: String) {
+    pub async fn recv_offer(&mut self, sdp: String) -> Result<()> {
         if self.conn.signaling_state() != RTCSignalingState::Stable {
             self.debug("signaling state not stable");
-            return;
+            return Ok(());
         }
         self.debug("offer received");
-        self.set_remote_description(RTCSessionDescription::offer(sdp).unwrap())
-            .await;
-        let answer = self.conn.create_answer(None).await.unwrap();
-        self.conn
-            .set_local_description(answer.clone())
-            .await
-            .unwrap();
-        self.signal_tx.send(ServerMessage::Answer(answer.sdp)).await;
+        self.set_remote_description(RTCSessionDescription::offer(sdp)?)
+            .await?;
+        let answer = self.conn.create_answer(None).await?;
+        self.conn.set_local_description(answer.clone()).await?;
+        self.signal_tx
+            .send(ServerMessage::Answer(answer.sdp))
+            .await?;
         self.debug("answer sent");
+        Ok(())
     }
 
-    pub async fn recv_answer(&mut self, sdp: String) {
+    pub async fn recv_answer(&mut self, sdp: String) -> Result<()> {
         self.debug("answer received");
-        self.set_remote_description(RTCSessionDescription::answer(sdp).unwrap())
-            .await;
+        self.set_remote_description(RTCSessionDescription::answer(sdp)?)
+            .await?;
+        Ok(())
     }
 
-    pub async fn add_candidate(&mut self, candidate: RTCIceCandidateInit) {
+    pub async fn add_candidate(&mut self, candidate: RTCIceCandidateInit) -> Result<()> {
         self.debug("new remote ice candidate");
         if self.conn.remote_description().await.is_some() {
-            self.conn.add_ice_candidate(candidate).await.unwrap();
+            self.conn.add_ice_candidate(candidate).await?;
         } else {
             self.pending_candidates.push(candidate);
         }
+        Ok(())
     }
 
-    pub async fn close(&self) {
-        self.conn.close().await.unwrap();
+    pub async fn close(&self) -> Result<()> {
+        self.conn.close().await?;
         self.debug("connection closed");
+        Ok(())
     }
 }

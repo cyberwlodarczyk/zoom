@@ -9,7 +9,7 @@ use webrtc::{
     },
 };
 
-use crate::peer::PeerTrack;
+use crate::{error, peer::PeerTrack};
 
 pub struct Track {
     pub inner: PeerTrack,
@@ -19,12 +19,13 @@ pub struct Track {
 #[derive(Clone)]
 pub struct Sender {
     peer_id: u32,
+    error_tx: error::Sender,
     tx: mpsc::Sender<Track>,
 }
 
 impl Sender {
     pub fn send(self, remote: Arc<TrackRemote>) {
-        tokio::spawn(async move {
+        self.error_tx.spawn(async move {
             let kind = remote.kind();
             let local = Arc::new(TrackLocalStaticRTP::new(
                 remote.codec().capability,
@@ -39,11 +40,15 @@ impl Sender {
                     },
                     kind,
                 })
-                .await
-                .unwrap();
+                .await?;
             while let Ok((rtp, _)) = remote.read_rtp().await {
-                local.write_rtp(&rtp).await.unwrap();
+                if let Err(e) = local.write_rtp(&rtp).await {
+                    if e != webrtc::Error::ErrClosedPipe {
+                        return Err(e.into());
+                    }
+                }
             }
+            Ok(())
         });
     }
 }
@@ -58,7 +63,14 @@ impl Receiver {
     }
 }
 
-pub fn channel(peer_id: u32) -> (Sender, Receiver) {
+pub fn channel(peer_id: u32, error_tx: error::Sender) -> (Sender, Receiver) {
     let (tx, rx) = mpsc::channel(2);
-    (Sender { peer_id, tx }, Receiver { rx })
+    (
+        Sender {
+            peer_id,
+            tx,
+            error_tx,
+        },
+        Receiver { rx },
+    )
 }

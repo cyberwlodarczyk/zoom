@@ -9,6 +9,7 @@ use webrtc::{
 };
 
 use crate::{
+    error::Result,
     peer::Peer,
     signal::{self, ServerMessage, ServerMessagePeer},
 };
@@ -28,8 +29,12 @@ impl Room {
         }
     }
 
+    fn try_get_peer_index(&self, id: u32) -> Option<usize> {
+        self.peers.iter().position(|peer| peer.id == id)
+    }
+
     fn get_peer_index(&self, id: u32) -> usize {
-        self.peers.iter().position(|peer| peer.id == id).unwrap()
+        self.try_get_peer_index(id).unwrap()
     }
 
     pub fn get_peer(&self, id: u32) -> &Peer {
@@ -42,27 +47,28 @@ impl Room {
         &mut self.peers[index]
     }
 
-    pub async fn add_peer(&mut self, signal_tx: signal::Sender) -> u32 {
+    pub async fn add_peer(&mut self, signal_tx: signal::Sender) -> Result<u32> {
         let id = self.next_peer_id.fetch_add(1, Ordering::Relaxed);
-        self.peers.push(Peer::new(id, self.id, signal_tx).await);
-        id
+        self.peers.push(Peer::new(id, self.id, signal_tx).await?);
+        Ok(id)
     }
 
-    pub fn remove_peer(&mut self, id: u32) -> Peer {
-        self.peers.swap_remove(self.get_peer_index(id))
+    pub fn remove_peer(&mut self, id: u32) -> Option<Peer> {
+        Some(self.peers.swap_remove(self.try_get_peer_index(id)?))
     }
 
-    pub async fn add_other_peers_tracks(&self, peer: &Peer) {
+    pub async fn add_other_peers_tracks(&self, peer: &Peer) -> Result<()> {
         for other in &self.peers {
             if other.id == peer.id {
                 continue;
             }
             for track in [&other.video, &other.audio] {
                 if let Some(track) = track {
-                    peer.add_sendonly_transceiver(&track.inner).await;
+                    peer.add_sendonly_transceiver(&track.inner).await?;
                 }
             }
         }
+        Ok(())
     }
 
     pub fn get_server_message_peers(&self, for_peer_id: u32) -> Vec<ServerMessagePeer> {
@@ -79,7 +85,7 @@ impl Room {
             .collect()
     }
 
-    pub async fn send_joined_peer(&mut self, id: u32, name: String) {
+    pub async fn send_joined_peer(&mut self, id: u32, name: String) -> Result<()> {
         for other in &mut self.peers {
             if other.id == id {
                 continue;
@@ -89,18 +95,23 @@ impl Room {
                     id,
                     name: name.clone(),
                 }))
-                .await;
+                .await?;
         }
+        Ok(())
     }
 
-    pub async fn handle_peer_leave(&mut self, id: u32) {
-        let peer = self.remove_peer(id);
-        peer.close().await;
-        for other in &mut self.peers {
-            other.send_message(ServerMessage::PeerLeft(id)).await;
-            other.stop_transceivers(id).await;
-            other.send_offer().await;
-        }
+    pub async fn handle_peer_leave(&mut self, id: u32) -> Result<bool> {
+        Ok(if let Some(peer) = self.remove_peer(id) {
+            peer.close().await?;
+            for other in &mut self.peers {
+                other.send_message(ServerMessage::PeerLeft(id)).await?;
+                other.stop_transceivers(id).await?;
+                other.send_offer().await?;
+            }
+            true
+        } else {
+            false
+        })
     }
 
     pub async fn add_peer_track_to_others(
@@ -108,23 +119,25 @@ impl Room {
         peer_id: u32,
         track: Arc<TrackLocalStaticRTP>,
         send_offer: bool,
-    ) {
+    ) -> Result<()> {
         for other in &mut self.peers {
             if other.id == peer_id {
                 continue;
             }
-            other.add_sendonly_transceiver(&track).await;
+            other.add_sendonly_transceiver(&track).await?;
             if send_offer {
-                other.send_offer().await;
+                other.send_offer().await?;
             }
         }
+        Ok(())
     }
 
-    pub async fn send_pli(&self, peer_id: u32) {
+    pub async fn send_pli(&self, peer_id: u32) -> Result<()> {
         for peer in &self.peers {
             if peer.id == peer_id {
-                peer.send_pli().await;
+                peer.send_pli().await?;
             }
         }
+        Ok(())
     }
 }
